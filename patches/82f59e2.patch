@@ -1,0 +1,213 @@
+From 82f59e20e67286cc3ef61cd1506f9e9da5e2ca6d Mon Sep 17 00:00:00 2001
+From: spaceavenue <spaceavenue@proton.me>
+Date: Wed, 10 Jun 2026 21:13:58 +0530
+Subject: [PATCH] Add vertical centering for single windows in a column
+
+---
+ docs/wiki/Configuration:-Layout.md | 13 ++++++
+ niri-config/src/layout.rs          |  5 +++
+ niri-config/src/lib.rs             |  1 +
+ src/layout/scrolling.rs            | 68 +++++++++++++++++++++++++++---
+ src/layout/tests.rs                |  2 +
+ 5 files changed, 82 insertions(+), 7 deletions(-)
+
+diff --git a/docs/wiki/Configuration:-Layout.md b/docs/wiki/Configuration:-Layout.md
+index 5e5e2a5c6c..b0d04e545f 100644
+--- a/docs/wiki/Configuration:-Layout.md
++++ b/docs/wiki/Configuration:-Layout.md
+@@ -9,6 +9,7 @@ layout {
+     gaps 16
+     center-focused-column "never"
+     always-center-single-column
++    center-single-window
+     empty-workspace-above-first
+     default-column-display "tabbed"
+     background-color "#003300"
+@@ -142,6 +143,18 @@ layout {
+ }
+ ```
+ 
++### `center-single-window`
++
++<sup>Since: next release</sup>
++
++If set, niri will vertically center single windows in columns.
++
++```kdl
++layout {
++    center-single-window
++}
++```
++
+ ### `empty-workspace-above-first`
+ 
+ <sup>Since: 25.01</sup>
+diff --git a/niri-config/src/layout.rs b/niri-config/src/layout.rs
+index f84528bd33..9ea522a2b3 100644
+--- a/niri-config/src/layout.rs
++++ b/niri-config/src/layout.rs
+@@ -19,6 +19,7 @@ pub struct Layout {
+     pub preset_window_heights: Vec<PresetSize>,
+     pub center_focused_column: CenterFocusedColumn,
+     pub always_center_single_column: bool,
++    pub center_single_window: bool,
+     pub empty_workspace_above_first: bool,
+     pub default_column_display: ColumnDisplay,
+     pub gaps: f64,
+@@ -42,6 +43,7 @@ impl Default for Layout {
+             default_column_width: Some(PresetSize::Proportion(0.5)),
+             center_focused_column: CenterFocusedColumn::Never,
+             always_center_single_column: false,
++            center_single_window: false,
+             empty_workspace_above_first: false,
+             default_column_display: ColumnDisplay::Normal,
+             gaps: 16.,
+@@ -66,6 +68,7 @@ impl MergeWith<LayoutPart> for Layout {
+             tab_indicator,
+             insert_hint,
+             always_center_single_column,
++            center_single_window,
+             empty_workspace_above_first,
+             gaps,
+         );
+@@ -117,6 +120,8 @@ pub struct LayoutPart {
+     #[knuffel(child)]
+     pub always_center_single_column: Option<Flag>,
+     #[knuffel(child)]
++    pub center_single_window: Option<Flag>,
++    #[knuffel(child)]
+     pub empty_workspace_above_first: Option<Flag>,
+     #[knuffel(child, unwrap(argument, str))]
+     pub default_column_display: Option<ColumnDisplay>,
+diff --git a/niri-config/src/lib.rs b/niri-config/src/lib.rs
+index 77f0796741..5c741a92cd 100644
+--- a/niri-config/src/lib.rs
++++ b/niri-config/src/lib.rs
+@@ -1458,6 +1458,7 @@ mod tests {
+                 ],
+                 center_focused_column: OnOverflow,
+                 always_center_single_column: false,
++                center_single_window: false,
+                 empty_workspace_above_first: false,
+                 default_column_display: Tabbed,
+                 gaps: 8.0,
+diff --git a/src/layout/scrolling.rs b/src/layout/scrolling.rs
+index 9739abdfc1..32724cb9ad 100644
+--- a/src/layout/scrolling.rs
++++ b/src/layout/scrolling.rs
+@@ -1072,13 +1072,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
+ 
+         let movement_config = anim_config.unwrap_or(self.options.animations.window_movement.0);
+ 
+-        // Animate movement of other tiles.
+-        // FIXME: tiles can move by X too, in a centered or resizing layout with one window smaller
+-        // than the others.
+-        let offset_y = column.tile_offset(tile_idx + 1).y - column.tile_offset(tile_idx).y;
+-        for tile in &mut column.tiles[tile_idx + 1..] {
+-            tile.animate_move_y_from(offset_y);
+-        }
++        // Capture positions of all tiles before removal for animating leftover windows.
++        let prev_offsets: Vec<Point<f64, Logical>> =
++            column.tile_offsets().take(column.tiles.len()).collect();
+ 
+         if column.display_mode == ColumnDisplay::Tabbed && tile_idx != column.active_tile_idx {
+             // Fade in when removing background tab from a tabbed column.
+@@ -1134,6 +1130,22 @@ impl<W: LayoutElement> ScrollingSpace<W> {
+         }
+ 
+         column.update_tile_sizes_with_transaction(true, transaction);
++
++        // Animate tiles to their new positions. This also fixes movement by X due to resizing in
++        // centered columns and such.
++        let mut prev_iter = prev_offsets
++            .iter()
++            .enumerate()
++            .filter(|(i, _)| *i != tile_idx);
++        for (tile, new_pos) in column.tiles_mut() {
++            if let Some((_, &old_pos)) = prev_iter.next() {
++                let offset = old_pos - new_pos;
++                if offset.x.abs() != 0. || offset.y.abs() != 0. {
++                    tile.animate_move_from(offset);
++                }
++            }
++        }
++
+         self.data[column_idx].update(column);
+         let offset = prev_width - column.width();
+ 
+@@ -4376,6 +4388,35 @@ impl<W: LayoutElement> Column<W> {
+                     tile.offset_move_y_anim_current(offset);
+                 }
+             }
++            // Animate vertically centering single window in a column.
++            if self.tiles.len() == 1
++                && self.sizing_mode().is_normal()
++                && self.options.layout.center_single_window
++            {
++                let column_height_avail = self.working_area.size.h - self.options.layout.gaps * 2.;
++                let prev_center = if prev_height < column_height_avail {
++                    (column_height_avail - prev_height) / 2.
++                } else {
++                    0.
++                };
++                let new_height = self.data[tile_idx].size.h;
++                let new_center = if new_height < column_height_avail {
++                    (column_height_avail - new_height) / 2.
++                } else {
++                    0.
++                };
++                let offset = prev_center - new_center;
++                if offset.abs() != 0. {
++                    if self.tiles[tile_idx].resize_animation().is_some() {
++                        self.tiles[tile_idx].animate_move_y_from_with_config(
++                            offset,
++                            self.options.animations.window_resize.anim,
++                        );
++                    } else {
++                        self.tiles[tile_idx].offset_move_y_anim_current(offset);
++                    }
++                }
++            }
+         }
+     }
+ 
+@@ -5213,6 +5254,19 @@ impl<W: LayoutElement> Column<W> {
+ 
+         let mut origin = self.tiles_origin();
+ 
++        // Center single windows vertically in columns.
++        if self.tiles.len() == 1
++            && !tabbed
++            && self.sizing_mode().is_normal()
++            && self.options.layout.center_single_window
++        {
++            let tile_height = self.data[0].size.h;
++            let column_height_avail = self.working_area.size.h - gaps * 2.;
++            if tile_height < column_height_avail {
++                origin.y += (column_height_avail - tile_height) / 2.;
++            }
++        }
++
+         // Chain with a dummy value to be able to get one past all tiles' Y.
+         let dummy = TileData {
+             height: WindowHeight::auto_1(),
+diff --git a/src/layout/tests.rs b/src/layout/tests.rs
+index 31265dd9df..c5f7da4c62 100644
+--- a/src/layout/tests.rs
++++ b/src/layout/tests.rs
+@@ -3887,6 +3887,7 @@ prop_compose! {
+         tab_indicator in prop::option::of(arbitrary_tab_indicator()),
+         center_focused_column in prop::option::of(arbitrary_center_focused_column()),
+         always_center_single_column in prop::option::of(any::<bool>().prop_map(Flag)),
++        center_single_window in prop::option::of(any::<bool>().prop_map(Flag)),
+         empty_workspace_above_first in prop::option::of(any::<bool>().prop_map(Flag)),
+     ) -> niri_config::LayoutPart {
+         niri_config::LayoutPart {
+@@ -3894,6 +3895,7 @@ prop_compose! {
+             struts,
+             center_focused_column,
+             always_center_single_column,
++            center_single_window,
+             empty_workspace_above_first,
+             focus_ring,
+             border,
