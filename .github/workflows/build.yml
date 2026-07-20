@@ -1,0 +1,66 @@
+name: Build niri-center
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out packaging files
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install build and runtime dependencies
+        run: |
+          set -euxo pipefail
+          pacman -Syu --needed --noconfirm \
+            cairo \
+            clang \
+            git \
+            glib2 \
+            glibc \
+            libdisplay-info \
+            libgcc \
+            libinput \
+            libpipewire \
+            libxkbcommon \
+            mesa \
+            pango \
+            pixman \
+            rust \
+            seatd \
+            systemd-libs \
+            xdg-desktop-portal-gtk
+          useradd --create-home builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: Build package as non-root user
+        run: |
+          set -euxo pipefail
+          runuser -u builder -- env HOME=/home/builder makepkg --cleanbuild --noconfirm
+
+      - name: Verify package payload
+        run: |
+          set -euxo pipefail
+          shopt -s nullglob
+          packages=(niri-center-*.pkg.tar.zst)
+          (( ${#packages[@]} == 1 ))
+          payload="$(bsdtar -tf "${packages[0]}" | grep -v '^\.' | grep -v '/$')"
+          [[ "$payload" == 'usr/bin/niri-center' ]]
+          test -s "${packages[0]}"
+
+      - name: Upload package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: niri-center-${{ github.sha }}
+          path: niri-center-*.pkg.tar.zst
+          if-no-files-found: error
