@@ -30,7 +30,7 @@ makedepends=(
 _commit='8ed0da44d974c32c6877d2f4630c314da0717ecb'
 source=(
   "niri-${_commit}.tar.gz::https://github.com/YaLTeR/niri/archive/${_commit}.tar.gz"
-  'patches/82f59e2.patch'
+  "82f59e2.patch::file://${startdir}/patches/82f59e2.patch"
 )
 sha256sums=(
   'b065863db54ee44ea64c5019d70655b02f04a252966779f325600e7f953906d0'
