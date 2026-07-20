@@ -44,6 +44,7 @@ prepare() {
 
 build() {
   cd "niri-${_commit}"
+  CFLAGS+=(' -ffat-lto-objects')
   cargo build --release --locked
 }
 
