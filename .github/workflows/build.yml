@@ -52,7 +52,7 @@ jobs:
         run: |
           set -euxo pipefail
           shopt -s nullglob
-          packages=(niri-center-*.pkg.tar.zst)
+          packages=(niri-center-[0-9]*.pkg.tar.zst)
           (( ${#packages[@]} == 1 ))
           payload="$(bsdtar -tf "${packages[0]}" | grep -v '^\.' | grep -v '/$')"
           [[ "$payload" == 'usr/bin/niri-center' ]]
@@ -62,5 +62,5 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: niri-center-${{ github.sha }}
-          path: niri-center-*.pkg.tar.zst
+          path: niri-center-[0-9]*.pkg.tar.zst
           if-no-files-found: error
