@@ -41,8 +41,8 @@ sha256sums=(
 
 prepare() {
   cd "niri-${_commit}"
-  patch -Np1 -i "${srcdir}/82f59e2.patch"
-  patch -Np1 -i "${srcdir}/portrait-fill-current-column.patch"
+  patch --no-backup-if-mismatch -Np1 -i "${srcdir}/82f59e2.patch"
+  patch --no-backup-if-mismatch -Np1 -i "${srcdir}/portrait-fill-current-column.patch"
 }
 
 build() {
