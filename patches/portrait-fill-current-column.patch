@@ -1,0 +1,339 @@
+diff --git a/niri-config/src/layout.rs b/niri-config/src/layout.rs
+index 9ea522a2..4cb0e9be 100644
+--- a/niri-config/src/layout.rs
++++ b/niri-config/src/layout.rs
+@@ -20,6 +20,7 @@ pub struct Layout {
+     pub center_focused_column: CenterFocusedColumn,
+     pub always_center_single_column: bool,
+     pub center_single_window: bool,
++    pub portrait_fill_current_column: bool,
+     pub empty_workspace_above_first: bool,
+     pub default_column_display: ColumnDisplay,
+     pub gaps: f64,
+@@ -44,6 +45,7 @@ impl Default for Layout {
+             center_focused_column: CenterFocusedColumn::Never,
+             always_center_single_column: false,
+             center_single_window: false,
++            portrait_fill_current_column: false,
+             empty_workspace_above_first: false,
+             default_column_display: ColumnDisplay::Normal,
+             gaps: 16.,
+@@ -69,6 +71,7 @@ impl MergeWith<LayoutPart> for Layout {
+             insert_hint,
+             always_center_single_column,
+             center_single_window,
++            portrait_fill_current_column,
+             empty_workspace_above_first,
+             gaps,
+         );
+@@ -122,6 +125,8 @@ pub struct LayoutPart {
+     #[knuffel(child)]
+     pub center_single_window: Option<Flag>,
+     #[knuffel(child)]
++    pub portrait_fill_current_column: Option<Flag>,
++    #[knuffel(child)]
+     pub empty_workspace_above_first: Option<Flag>,
+     #[knuffel(child, unwrap(argument, str))]
+     pub default_column_display: Option<ColumnDisplay>,
+diff --git a/src/layout/mod.rs b/src/layout/mod.rs
+index 5c4dd639..18c6a29e 100644
+--- a/src/layout/mod.rs
++++ b/src/layout/mod.rs
+@@ -937,6 +937,7 @@ impl<W: LayoutElement> Layout<W> {
+     ) -> Option<&Output> {
+         let scrolling_height = height.map(SizeChange::from);
+         let id = window.id().clone();
++        let was_auto_target = matches!(target, AddWindowTarget::Auto);
+ 
+         match &mut self.monitor_set {
+             MonitorSet::Normal {
+@@ -1021,14 +1022,18 @@ impl<W: LayoutElement> Layout<W> {
+ 
+                 // Set the default height for scrolling windows.
+                 if !is_floating {
++                    let ws = mon
++                        .workspaces
++                        .iter_mut()
++                        .find(|ws| ws.has_window(&id))
++                        .unwrap();
+                     if let Some(change) = scrolling_height {
+-                        let ws = mon
+-                            .workspaces
+-                            .iter_mut()
+-                            .find(|ws| ws.has_window(&id))
+-                            .unwrap();
+                         ws.set_window_height(Some(&id), change);
+                     }
++
++                    if was_auto_target {
++                        ws.try_portrait_fill_current_column(&id);
++                    }
+                 }
+ 
+                 Some(&mon.output)
+diff --git a/src/layout/scrolling.rs b/src/layout/scrolling.rs
+index d1d51b8f..b1345d56 100644
+--- a/src/layout/scrolling.rs
++++ b/src/layout/scrolling.rs
+@@ -960,6 +960,92 @@ impl<W: LayoutElement> ScrollingSpace<W> {
+         self.add_tile(Some(col_idx), tile, activate, width, is_full_width, None);
+     }
+ 
++    /// Moves a newly added window into the immediately previous column when it fits vertically
++    /// on a portrait working area. Returns whether the window was moved.
++    pub fn try_portrait_fill_current_column(&mut self, window: &W::Id) -> bool {
++        if !self.options.layout.portrait_fill_current_column {
++            return false;
++        }
++
++        if self.working_area.size.h <= self.working_area.size.w {
++            return false;
++        }
++
++        let Some(source_col_idx) = self.columns.iter().position(|col| col.contains(window)) else {
++            return false;
++        };
++
++        let Some(dest_col_idx) = source_col_idx.checked_sub(1) else {
++            return false;
++        };
++
++        let source = &self.columns[source_col_idx];
++        let dest = &self.columns[dest_col_idx];
++
++        let column_is_eligible = |col: &Column<W>| {
++            col.display_mode == ColumnDisplay::Normal
++                && !col.is_full_width
++                && !col.is_pending_fullscreen
++                && !col.is_pending_maximized
++                && col.sizing_mode().is_normal()
++        };
++        if !column_is_eligible(source) || !column_is_eligible(dest) {
++            return false;
++        }
++
++        let source_tile_idx = source.position(window).unwrap();
++        let tile = &source.tiles[source_tile_idx];
++        if !tile.window().pending_sizing_mode().is_normal() {
++            return false;
++        }
++
++        // Equality fits: the incoming tile gets its own trailing gap after the move.
++        let gaps = self.options.layout.gaps;
++        let dest_tile_count_after_move = dest.tiles.len() + 1;
++        let mut needed = tile.tile_expected_or_current_size().h;
++        for dest_tile in &dest.tiles {
++            needed += dest_tile.tile_expected_or_current_size().h;
++        }
++        needed += (dest_tile_count_after_move + 1) as f64 * gaps;
++        if needed > self.working_area.size.h {
++            return false;
++        }
++
++        let saved_height = source.data[source_tile_idx].height;
++        let source_was_active = self.active_column_idx == source_col_idx;
++
++        let offset =
++            self.column_x(source_col_idx) + source.render_offset().x - self.column_x(dest_col_idx);
++        let mut offset = Point::from((offset, 0.));
++        let prev_off = source.tile_offset(source_tile_idx);
++
++        let removed = self.remove_tile(window, Transaction::new());
++
++        // If the source column was to the left of the destination, removing it shifts the
++        // destination index down by one.
++        let dest_col_idx = if source_col_idx < dest_col_idx {
++            dest_col_idx - 1
++        } else {
++            dest_col_idx
++        };
++
++        self.add_tile_to_column(dest_col_idx, None, removed.tile, source_was_active);
++
++        // add_tile_to_column() resets the moved height to auto; reapply the resolved height.
++        let dest = &mut self.columns[dest_col_idx];
++        let new_tile_idx = dest.tiles.len() - 1;
++        dest.data[new_tile_idx].height = saved_height;
++        dest.update_tile_sizes(false);
++
++        offset += prev_off - dest.tile_offset(new_tile_idx);
++        offset.x -= dest.render_offset().x;
++
++        let new_tile = &mut dest.tiles[new_tile_idx];
++        new_tile.animate_move_from(offset);
++
++        true
++    }
++
+     pub fn add_column(
+         &mut self,
+         idx: Option<usize>,
+diff --git a/src/layout/tests.rs b/src/layout/tests.rs
+index c5f7da4c..3f6ccd1d 100644
+--- a/src/layout/tests.rs
++++ b/src/layout/tests.rs
+@@ -1654,6 +1654,145 @@ fn check_ops_with_options(
+     layout
+ }
+ 
++fn add_test_output(layout: &mut Layout<TestWindow>, size: (i32, i32)) {
++    let output = Output::new(
++        "output".to_owned(),
++        PhysicalProperties {
++            size: Size::from(size),
++            subpixel: Subpixel::Unknown,
++            make: String::new(),
++            model: String::new(),
++            serial_number: String::new(),
++        },
++    );
++    output.change_current_state(
++        Some(Mode {
++            size: Size::from(size),
++            refresh: 60000,
++        }),
++        None,
++        None,
++        None,
++    );
++    output.user_data().insert_if_missing(|| OutputName {
++        connector: "output".to_owned(),
++        make: None,
++        model: None,
++        serial: None,
++    });
++    layout.add_output(output, None);
++    layout.verify_invariants();
++}
++
++fn add_half_height_window(layout: &mut Layout<TestWindow>, id: usize) {
++    layout.add_window(
++        TestWindow::new(TestWindowParams::new(id)),
++        AddWindowTarget::Auto,
++        None,
++        Some(PresetSize::Proportion(0.5)),
++        false,
++        false,
++        ActivateWindow::default(),
++    );
++    layout.verify_invariants();
++}
++
++fn scrolling_positions(layout: &Layout<TestWindow>) -> Vec<(usize, Option<(usize, usize)>)> {
++    layout
++        .active_workspace()
++        .unwrap()
++        .scrolling()
++        .tiles_with_ipc_layouts()
++        .map(|(tile, window_layout)| (*tile.window().id(), window_layout.pos_in_scrolling_layout))
++        .collect()
++}
++
++#[test]
++fn portrait_fill_current_column_fills_until_overflow() {
++    let mut config = Config::default();
++    config.layout = niri_config::Layout::from_part(&niri_config::LayoutPart {
++        portrait_fill_current_column: Some(Flag),
++        center_single_window: Some(Flag),
++        gaps: Some(FloatOrInt(16.)),
++        ..Default::default()
++    });
++    let mut layout = Layout::new(Clock::with_time(Duration::ZERO), &config);
++
++    add_test_output(&mut layout, (1080, 1920));
++    add_half_height_window(&mut layout, 1);
++    assert_eq!(scrolling_positions(&layout), [(1, Some((1, 1)))]);
++    let first_y = layout
++        .active_workspace()
++        .unwrap()
++        .scrolling()
++        .tiles_with_render_positions()
++        .find(|(tile, _, _)| tile.window().id() == &1)
++        .unwrap()
++        .1
++        .y;
++    assert_eq!(first_y, 492.);
++
++    add_half_height_window(&mut layout, 2);
++    assert_eq!(
++        scrolling_positions(&layout),
++        [(1, Some((1, 1))), (2, Some((1, 2)))]
++    );
++
++    add_half_height_window(&mut layout, 3);
++    assert_eq!(
++        scrolling_positions(&layout),
++        [(1, Some((1, 1))), (2, Some((1, 2))), (3, Some((2, 1))),]
++    );
++    let overflow_y = layout
++        .active_workspace()
++        .unwrap()
++        .scrolling()
++        .tiles_with_render_positions()
++        .find(|(tile, _, _)| tile.window().id() == &3)
++        .unwrap()
++        .1
++        .y;
++    assert_eq!(overflow_y, 492.);
++
++    check_ops_on_layout(
++        &mut layout,
++        [
++            Op::FullscreenWindow(2),
++            Op::Communicate(2),
++            Op::FullscreenWindow(2),
++            Op::Communicate(2),
++        ],
++    );
++    assert_eq!(
++        scrolling_positions(&layout),
++        [(1, Some((1, 1))), (2, Some((1, 2))), (3, Some((2, 1))),]
++    );
++}
++
++#[test]
++fn portrait_fill_current_column_keeps_landscape_insertion() {
++    let disabled_layout = niri_config::Layout::from_part(&niri_config::LayoutPart::default());
++    assert!(!disabled_layout.portrait_fill_current_column);
++
++    let mut config = Config::default();
++    config.layout = niri_config::Layout::from_part(&niri_config::LayoutPart {
++        portrait_fill_current_column: Some(Flag),
++        gaps: Some(FloatOrInt(16.)),
++        ..Default::default()
++    });
++    let mut layout = Layout::new(Clock::with_time(Duration::ZERO), &config);
++
++    add_test_output(&mut layout, (1920, 1080));
++    add_half_height_window(&mut layout, 1);
++    add_half_height_window(&mut layout, 2);
++    add_half_height_window(&mut layout, 3);
++
++    assert_eq!(
++        scrolling_positions(&layout),
++        [(1, Some((1, 1))), (2, Some((2, 1))), (3, Some((3, 1))),]
++    );
++}
++
+ #[test]
+ fn operations_dont_panic() {
+     if std::env::var_os("RUN_SLOW_TESTS").is_none() {
+diff --git a/src/layout/workspace.rs b/src/layout/workspace.rs
+index 49548a83..95fd680d 100644
+--- a/src/layout/workspace.rs
++++ b/src/layout/workspace.rs
+@@ -1219,6 +1219,14 @@ impl<W: LayoutElement> Workspace<W> {
+         }
+     }
+ 
++    pub fn try_portrait_fill_current_column(&mut self, window: &W::Id) -> bool {
++        if self.floating_is_active.get() {
++            return false;
++        }
++
++        self.scrolling.try_portrait_fill_current_column(window)
++    }
++
+     pub fn reset_window_height(&mut self, window: Option<&W::Id>) {
+         if window.map_or(self.floating_is_active.get(), |id| {
+             self.floating.has_window(id)
