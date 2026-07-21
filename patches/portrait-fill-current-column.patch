@@ -233,8 +233,8 @@ index c5f7da4c..3f6ccd1d 100644
 +fn portrait_fill_current_column_fills_until_overflow() {
 +    let mut config = Config::default();
 +    config.layout = niri_config::Layout::from_part(&niri_config::LayoutPart {
-+        portrait_fill_current_column: Some(Flag),
-+        center_single_window: Some(Flag),
++        portrait_fill_current_column: Some(Flag(true)),
++        center_single_window: Some(Flag(true)),
 +        gaps: Some(FloatOrInt(16.)),
 +        ..Default::default()
 +    });
@@ -298,7 +298,7 @@ index c5f7da4c..3f6ccd1d 100644
 +
 +    let mut config = Config::default();
 +    config.layout = niri_config::Layout::from_part(&niri_config::LayoutPart {
-+        portrait_fill_current_column: Some(Flag),
++        portrait_fill_current_column: Some(Flag(true)),
 +        gaps: Some(FloatOrInt(16.)),
 +        ..Default::default()
 +    });
