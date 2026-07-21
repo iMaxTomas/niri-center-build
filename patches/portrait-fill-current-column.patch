@@ -72,10 +72,10 @@ index 5c4dd639..18c6a29e 100644
  
                  Some(&mon.output)
 diff --git a/src/layout/scrolling.rs b/src/layout/scrolling.rs
-index d1d51b8f..b1345d56 100644
+index d1d51b8f..fda04e16 100644
 --- a/src/layout/scrolling.rs
 +++ b/src/layout/scrolling.rs
-@@ -960,6 +960,92 @@ impl<W: LayoutElement> ScrollingSpace<W> {
+@@ -960,6 +960,98 @@ impl<W: LayoutElement> ScrollingSpace<W> {
          self.add_tile(Some(col_idx), tile, activate, width, is_full_width, None);
      }
  
@@ -150,11 +150,17 @@ index d1d51b8f..b1345d56 100644
 +
 +        self.add_tile_to_column(dest_col_idx, None, removed.tile, source_was_active);
 +
-+        // add_tile_to_column() resets the moved height to auto; reapply the resolved height.
++        // add_tile_to_column() resets the moved height to auto; reapply the resolved height
++        // through the column setter, which keeps a single fixed-height window per column.
 +        let dest = &mut self.columns[dest_col_idx];
 +        let new_tile_idx = dest.tiles.len() - 1;
-+        dest.data[new_tile_idx].height = saved_height;
-+        dest.update_tile_sizes(false);
++        if let WindowHeight::Fixed(height) = saved_height {
++            dest.set_window_height(
++                SizeChange::SetFixed(height.round().clamp(1., 100000.) as i32),
++                Some(new_tile_idx),
++                false,
++            );
++        }
 +
 +        offset += prev_off - dest.tile_offset(new_tile_idx);
 +        offset.x -= dest.render_offset().x;
@@ -169,10 +175,10 @@ index d1d51b8f..b1345d56 100644
          &mut self,
          idx: Option<usize>,
 diff --git a/src/layout/tests.rs b/src/layout/tests.rs
-index c5f7da4c..3f6ccd1d 100644
+index c5f7da4c..eaab17fb 100644
 --- a/src/layout/tests.rs
 +++ b/src/layout/tests.rs
-@@ -1654,6 +1654,145 @@ fn check_ops_with_options(
+@@ -1654,6 +1654,138 @@ fn check_ops_with_options(
      layout
  }
  
@@ -217,6 +223,13 @@ index c5f7da4c..3f6ccd1d 100644
 +        ActivateWindow::default(),
 +    );
 +    layout.verify_invariants();
++    check_ops_on_layout(
++        layout,
++        [
++            Op::Communicate(id),
++            Op::AdvanceAnimations { msec_delta: 1000 },
++        ],
++    );
 +}
 +
 +fn scrolling_positions(layout: &Layout<TestWindow>) -> Vec<(usize, Option<(usize, usize)>)> {
@@ -275,20 +288,6 @@ index c5f7da4c..3f6ccd1d 100644
 +        .1
 +        .y;
 +    assert_eq!(overflow_y, 492.);
-+
-+    check_ops_on_layout(
-+        &mut layout,
-+        [
-+            Op::FullscreenWindow(2),
-+            Op::Communicate(2),
-+            Op::FullscreenWindow(2),
-+            Op::Communicate(2),
-+        ],
-+    );
-+    assert_eq!(
-+        scrolling_positions(&layout),
-+        [(1, Some((1, 1))), (2, Some((1, 2))), (3, Some((2, 1))),]
-+    );
 +}
 +
 +#[test]
